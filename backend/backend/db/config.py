@@ -7,4 +7,4 @@ MONGO_URI = os.getenv("MONGO_URI")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
 
 client = AsyncIOMotorClient(MONGO_URI)
-db = client[DATABASE_NAME] if DATABASE_NAME else client["farm_app"]
+db = client["farm_app"]  # Replace with your DB name
