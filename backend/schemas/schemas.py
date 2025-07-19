@@ -1,6 +1,5 @@
 from pydantic import BaseModel
 from enum import Enum
-from typing import Optional
 
 class UserRole(str, Enum):
     admin = "admin"
@@ -17,8 +16,3 @@ class UserRegisterSchema(BaseModel):
     password: str
     role: UserRole
     org_code: str
-
-class EmployeeUpdateSchema(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    role: Optional[UserRole] = None

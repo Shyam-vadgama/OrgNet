@@ -1,9 +1,19 @@
-from fastapi import APIRouter, HTTPException, Depends, Body
+import os
+from fastapi import APIRouter, HTTPException, Depends, Body, UploadFile, File
 from models.models import User, Organization, TokenResponse
 from db.config import db
-from utils import hash_password, verify_password, create_token, get_current_user, oauth2_scheme
+from utils import hash_password, verify_password, create_token, get_current_user, oauth2_scheme, encrypt_bytes, decrypt_bytes
 from fastapi import status
 from fastapi.security import OAuth2PasswordRequestForm
+from schemas.schemas import EmployeeUpdateSchema
+from bson import ObjectId
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel
+from typing import Optional
+import io
+
+UPLOAD_DIR = os.path.join(os.path.dirname(__file__), '../docs_uploads')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 router = APIRouter()
 
@@ -118,8 +128,147 @@ async def get_employees(current_user: dict = Depends(get_current_user)):
         cleaned_employees.append(emp)
     return {"employees": cleaned_employees}
 
+@router.get("/admin/employees/{employee_id}")
+async def get_employee(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    if not org_code:
+        raise HTTPException(status_code=400, detail="No organization found for admin")
+    emp = await db["users"].find_one({"id": employee_id, "org_code": org_code, "role": "employee"})
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    emp.pop("password", None)
+    if "_id" in emp:
+        emp["_id"] = str(emp["_id"])
+    return emp
+
+@router.put("/admin/employees/{employee_id}")
+async def update_employee(employee_id: str, update: EmployeeUpdateSchema, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    if not org_code:
+        raise HTTPException(status_code=400, detail="No organization found for admin")
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update fields provided")
+    result = await db["users"].update_one({"id": employee_id, "org_code": org_code, "role": "employee"}, {"$set": update_data})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Employee not found or not in your organization")
+    return {"message": "Employee updated successfully"}
+
+@router.delete("/admin/employees/{employee_id}")
+async def delete_employee(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    if not org_code:
+        raise HTTPException(status_code=400, detail="No organization found for admin")
+    result = await db["users"].delete_one({"id": employee_id, "org_code": org_code, "role": "employee"})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Employee not found or not in your organization")
+    return {"message": "Employee deleted successfully"}
+
 # Keep the token endpoint for backward compatibility
 @router.post("/token", response_model=TokenResponse)
 async def token(form_data: OAuth2PasswordRequestForm = Depends()):
     return await login(form_data)
+
+@router.post("/admin/docs/upload")
+async def upload_doc(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    if not org_code:
+        raise HTTPException(status_code=400, detail="No organization found for admin")
+    # Save file (encrypted)
+    file_location = os.path.join(UPLOAD_DIR, file.filename)
+    content = await file.read()
+    encrypted_content = encrypt_bytes(content)
+    with open(file_location, "wb") as f:
+        f.write(encrypted_content)
+    # Store metadata in MongoDB
+    doc_meta = {
+        "filename": file.filename,
+        "content_type": file.content_type,
+        "org_code": org_code,
+        "uploader": current_user["sub"],
+    }
+    result = await db["docs"].insert_one(doc_meta)
+    return {"message": "File uploaded", "doc_id": str(result.inserted_id)}
+
+@router.get("/documents")
+async def list_docs(current_user: dict = Depends(get_current_user)):
+    org_code = current_user.get("org")
+    docs = await db["docs"].find({"org_code": org_code}).to_list(length=100)
+    for doc in docs:
+        doc["_id"] = str(doc["_id"])
+    return {"docs": docs}
+
+@router.get("/docs/{doc_id}")
+async def get_doc(doc_id: str, current_user: dict = Depends(get_current_user)):
+    from bson import ObjectId
+    doc = await db["docs"].find_one({"_id": ObjectId(doc_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # Only allow access to docs in user's org
+    org_code = current_user.get("org")
+    if doc["org_code"] != org_code:
+        raise HTTPException(status_code=403, detail="Not allowed to access this document")
+    file_path = os.path.join(UPLOAD_DIR, doc["filename"])
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="File not found on server")
+    # Decrypt file before sending
+    with open(file_path, "rb") as f:
+        encrypted_content = f.read()
+        decrypted_content = decrypt_bytes(encrypted_content)
+    # Return as a streaming response
+    return StreamingResponse(io.BytesIO(decrypted_content), media_type=doc["content_type"], headers={"Content-Disposition": f"attachment; filename={doc['filename']}"})
+
+class DocUpdateSchema(BaseModel):
+    filename: Optional[str] = None
+    content_type: Optional[str] = None
+
+@router.put("/admin/docs/{doc_id}")
+async def update_doc(doc_id: str, update: DocUpdateSchema, current_user: dict = Depends(get_current_user)):
+    from bson import ObjectId
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    doc = await db["docs"].find_one({"_id": ObjectId(doc_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc["org_code"] != org_code:
+        raise HTTPException(status_code=403, detail="Not allowed to update this document")
+    update_data = {k: v for k, v in update.dict().items() if v is not None}
+    if not update_data:
+        raise HTTPException(status_code=400, detail="No update fields provided")
+    # If filename is changed, rename the file
+    UPLOAD_DIR = os.path.join(os.path.dirname(__file__), '../docs_uploads')
+    old_path = os.path.join(UPLOAD_DIR, doc["filename"])
+    new_path = os.path.join(UPLOAD_DIR, update_data["filename"]) if "filename" in update_data else old_path
+    if "filename" in update_data and os.path.exists(old_path):
+        os.rename(old_path, new_path)
+    result = await db["docs"].update_one({"_id": ObjectId(doc_id)}, {"$set": update_data})
+    return {"message": "Document updated"}
+
+@router.delete("/admin/docs/{doc_id}")
+async def delete_doc(doc_id: str, current_user: dict = Depends(get_current_user)):
+    from bson import ObjectId
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    doc = await db["docs"].find_one({"_id": ObjectId(doc_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc["org_code"] != org_code:
+        raise HTTPException(status_code=403, detail="Not allowed to delete this document")
+    # Delete file from disk
+    UPLOAD_DIR = os.path.join(os.path.dirname(__file__), '../docs_uploads')
+    file_path = os.path.join(UPLOAD_DIR, doc["filename"])
+    if os.path.exists(file_path):
+        os.remove(file_path)
+    await db["docs"].delete_one({"_id": ObjectId(doc_id)})
+    return {"message": "Document deleted"}
 

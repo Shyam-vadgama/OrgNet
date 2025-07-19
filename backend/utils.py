@@ -3,17 +3,11 @@ from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from fastapi import HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
-from cryptography.fernet import Fernet
-import base64
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 SECRET = "your-secret-key"
-# To generate a Fernet key, run:
-# from cryptography.fernet import Fernet; print(Fernet.generate_key())
-FERNET_KEY = b'Qk1Qb3JwQ2h6b3J6b2J6b3JwQ2h6b3J6b3JwQ2h6b3I='
-fernet = Fernet(FERNET_KEY)
 
 def hash_password(password):
     return pwd_context.hash(password)
@@ -25,23 +19,14 @@ def create_token(user):
     payload = {
         "sub": user.id,
         "role": user.role,
-        "org": user.org,  # Use 'org' instead of 'org_id'
+        "org": user.org_id,
         "exp": datetime.utcnow() + timedelta(hours=6)
     }
     return jwt.encode(payload, SECRET, algorithm="HS256")
 
 def get_current_user(token: str = Depends(oauth2_scheme)):
-    print(f"[DEBUG] Token received for verification: {token}")
     try:
         payload = jwt.decode(token, SECRET, algorithms=["HS256"])
-        print(f"[DEBUG] Token decoded successfully: {payload}")
         return payload
-    except JWTError as e:
-        print(f"[DEBUG] Token decode error: {e}")
+    except JWTError:
         raise HTTPException(401, "Invalid token")
-
-def encrypt_bytes(data: bytes) -> bytes:
-    return fernet.encrypt(data)
-
-def decrypt_bytes(token: bytes) -> bytes:
-    return fernet.decrypt(token)
