@@ -14,10 +14,3 @@ class User(BaseModel):
     password: str
     role: str = "student"
     org_code: Optional[str] = None
-
-class TokenResponse(BaseModel):
-    access_token: str
-    token_type: str
-    message: str
-    role: str
-    email: str
