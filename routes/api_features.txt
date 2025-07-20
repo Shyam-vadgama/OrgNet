@@ -1,0 +1,184 @@
+# API Features and Endpoints Documentation
+
+## 1. POST /organization/register
+- **Purpose:** Register a new organization
+- **Request Body:**
+```
+{
+  "name": "string",
+  "org_code": "string"
+}
+```
+
+## 2. POST /send-otp
+- **Purpose:** Send OTP for registration to email
+- **Request Body:**
+```
+{
+  "email": "string"
+}
+```
+
+## 3. POST /verify-otp-and-register
+- **Purpose:** Verify OTP and register a new user
+- **Request Body:**
+```
+{
+  "email": "string",
+  "otp": "string",
+  "name": "string",
+  "password": "string",
+  "role": "string", // default: student
+  "org_code": "string" // optional
+}
+```
+
+## 4. POST /send-password-reset-otp
+- **Purpose:** Send OTP for password reset
+- **Request Body:**
+```
+{
+  "email": "string"
+}
+```
+
+## 5. POST /reset-password-with-otp
+- **Purpose:** Reset password using OTP
+- **Request Body:**
+```
+{
+  "email": "string",
+  "otp": "string",
+  "new_password": "string"
+}
+```
+
+## 6. POST /register
+- **Purpose:** Register a new user (direct, no OTP)
+- **Request Body:**
+```
+{
+  "name": "string",
+  "email": "string",
+  "password": "string",
+  "role": "string", // default: student
+  "org_code": "string" // optional
+}
+```
+
+## 7. POST /employee/register
+- **Purpose:** Register a new employee (pending admin approval)
+- **Request Body:**
+```
+{
+  "name": "string",
+  "email": "string",
+  "password": "string",
+  "role": "employee",
+  "org_code": "string"
+}
+```
+
+## 8. POST /login
+- **Purpose:** Login for admin/employee
+- **Request Body (form):**
+```
+{
+  "username": "string", // email
+  "password": "string"
+}
+```
+- **Response:**
+```
+{
+  "access_token": "string",
+  "token_type": "string",
+  "message": "string",
+  "role": "string",
+  "email": "string"
+}
+```
+
+## 9. PUT /change-password
+- **Purpose:** Change password (authenticated)
+- **Request Body:**
+```
+{
+  "old_password": "string",
+  "new_password": "string"
+}
+```
+
+## 10. GET /admin/employees/pending
+- **Purpose:** List pending employees (admin only)
+- **Response:**
+```
+{
+  "pending_employees": [ ... ]
+}
+```
+
+## 11. POST /admin/employees/{employee_id}/approve
+- **Purpose:** Approve pending employee (admin only)
+
+## 12. POST /admin/employees/{employee_id}/reject
+- **Purpose:** Reject and delete pending employee (admin only)
+
+## 13. GET /admin/employees
+- **Purpose:** List all active employees (admin only)
+- **Response:**
+```
+{
+  "employees": [ ... ]
+}
+```
+
+## 14. GET /admin/employees/{employee_id}
+- **Purpose:** Get details of an employee (admin only)
+
+## 15. PUT /admin/employees/{employee_id}
+- **Purpose:** Update employee details (admin only)
+- **Request Body:**
+```
+{
+  "name": "string", // optional
+  "email": "string", // optional
+  "role": "string" // optional
+}
+```
+
+## 16. DELETE /admin/employees/{employee_id}
+- **Purpose:** Delete an employee (admin only)
+
+## 17. POST /token
+- **Purpose:** Login (same as /login)
+
+## 18. POST /admin/docs/upload
+- **Purpose:** Upload a document (admin only)
+- **Request Body:**
+  - Multipart file upload
+
+## 19. GET /documents
+- **Purpose:** List all documents for the organization
+- **Response:**
+```
+{
+  "docs": [ ... ]
+}
+```
+
+## 20. GET /docs/{doc_id}
+- **Purpose:** Download a document by ID
+
+## 21. PUT /admin/docs/{doc_id}
+- **Purpose:** Update document metadata (admin only)
+- **Request Body:**
+```
+{
+  "filename": "string", // optional
+  "content_type": "string" // optional
+}
+```
+
+## 22. DELETE /admin/docs/{doc_id}
+- **Purpose:** Delete a document (admin only) 

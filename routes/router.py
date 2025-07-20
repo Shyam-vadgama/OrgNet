@@ -2,7 +2,7 @@ import os
 from fastapi import APIRouter, HTTPException, Depends, Body, UploadFile, File
 from models.models import User, Organization, TokenResponse
 from db.config import db
-from utils import hash_password, verify_password, create_token, get_current_user, oauth2_scheme, encrypt_bytes, decrypt_bytes
+from utils import hash_password, verify_password, create_token, get_current_user, oauth2_scheme, encrypt_bytes, decrypt_bytes, send_email_otp, create_otp_record, verify_otp
 from fastapi import status
 from fastapi.security import OAuth2PasswordRequestForm
 from schemas.schemas import EmployeeUpdateSchema
@@ -11,6 +11,9 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import io
+from uuid import uuid4
+from dotenv import load_dotenv
+load_dotenv()
 
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), '../docs_uploads')
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -27,6 +30,109 @@ async def register_organization(org: Organization):
     await db["organizations"].insert_one(org_dict)
     return {"message": "Organization registered", "org_code": org.org_code}
 
+@router.post("/send-otp")
+async def send_otp_for_registration(data: dict):
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+    
+    # Check if user already exists
+    existing_user = await db["users"].find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User already exists")
+    
+    # Create and store OTP
+    otp_record = create_otp_record(email, "registration")
+    await db["otps"].insert_one(otp_record)
+    
+    # Send OTP via email
+    if send_email_otp(email, otp_record["otp"], "Email Verification OTP"):
+        return {"message": "OTP sent to your email"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to send OTP")
+
+@router.post("/verify-otp-and-register")
+async def verify_otp_and_register(data: dict):
+    email = data.get("email")
+    otp = data.get("otp")
+    name = data.get("name")
+    password = data.get("password")
+    role = data.get("role", "student")
+    org_code = data.get("org_code")
+    
+    if not all([email, otp, name, password]):
+        raise HTTPException(status_code=400, detail="Email, OTP, name, and password required")
+    
+    # Verify OTP
+    if not await verify_otp(email, otp, "registration"):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    
+    # Check if user already exists
+    existing_user = await db["users"].find_one({"email": email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User already exists")
+    
+    # Create user
+    user_dict = {
+        "id": str(uuid4()),
+        "name": name,
+        "email": email,
+        "password": hash_password(password),
+        "role": role,
+        "org_code": org_code,
+        "status": "active" if role != "employee" else "pending"
+    }
+    
+    await db["users"].insert_one(user_dict)
+    return {"message": "User registered successfully"}
+
+@router.post("/send-password-reset-otp")
+async def send_password_reset_otp(data: dict):
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+    
+    # Check if user exists
+    user = await db["users"].find_one({"email": email})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # Create and store OTP
+    otp_record = create_otp_record(email, "password_reset")
+    await db["otps"].insert_one(otp_record)
+    
+    # Send OTP via email
+    if send_email_otp(email, otp_record["otp"], "Password Reset OTP"):
+        return {"message": "Password reset OTP sent to your email"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to send OTP")
+
+@router.post("/reset-password-with-otp")
+async def reset_password_with_otp(data: dict):
+    email = data.get("email")
+    otp = data.get("otp")
+    new_password = data.get("new_password")
+    
+    if not all([email, otp, new_password]):
+        raise HTTPException(status_code=400, detail="Email, OTP, and new password required")
+    
+    # Verify OTP
+    if not await verify_otp(email, otp, "password_reset"):
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    
+    # Update password
+    hashed_password = hash_password(new_password)
+    result = await db["users"].update_one(
+        {"email": email},
+        {"$set": {"password": hashed_password}}
+    )
+    
+    if result.modified_count == 0:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {"message": "Password reset successfully"}
+
+# Update existing registration endpoints to use OTP verification
 @router.post("/register")
 async def register_user(user: User):
     existing = await db["users"].find_one({"email": user.email})
@@ -36,8 +142,9 @@ async def register_user(user: User):
     user_dict = user.dict()
     user_dict["id"] = str(user_dict["id"])
     user_dict["password"] = hash_password(user_dict["password"])
+    user_dict["status"] = "active"
     await db["users"].insert_one(user_dict)
-    return {"message": "User registered"}
+    return {"message": "User registered successfully"}
 
 @router.post("/employee/register")
 async def register_employee(user: User):
@@ -58,8 +165,9 @@ async def register_employee(user: User):
     user_dict = user.dict()
     user_dict["id"] = str(user_dict["id"])
     user_dict["password"] = hash_password(user_dict["password"])
+    user_dict["status"] = "pending"
     await db["users"].insert_one(user_dict)
-    return {"message": "Employee registered under valid organization"}
+    return {"message": "Employee registered and pending admin approval"}
 
 @router.post("/login", response_model=TokenResponse)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
@@ -112,6 +220,39 @@ async def change_password(
     await db["users"].update_one({"id": current_user["sub"]}, {"$set": {"password": hashed_new}})
     return {"message": "Password changed successfully"}
 
+@router.get("/admin/employees/pending")
+async def list_pending_employees(current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    employees = await db["users"].find({"role": "employee", "org_code": org_code, "status": "pending"}).to_list(length=100)
+    for emp in employees:
+        emp.pop("password", None)
+        if "_id" in emp:
+            emp["_id"] = str(emp["_id"])
+    return {"pending_employees": employees}
+
+@router.post("/admin/employees/{employee_id}/approve")
+async def approve_employee(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    result = await db["users"].update_one({"id": employee_id, "org_code": org_code, "role": "employee", "status": "pending"}, {"$set": {"status": "active"}})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Pending employee not found or not in your organization")
+    return {"message": "Employee approved and activated"}
+
+@router.post("/admin/employees/{employee_id}/reject")
+async def reject_employee(employee_id: str, current_user: dict = Depends(get_current_user)):
+    if current_user["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admins only")
+    org_code = current_user.get("org")
+    result = await db["users"].delete_one({"id": employee_id, "org_code": org_code, "role": "employee", "status": "pending"})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Pending employee not found or not in your organization")
+    return {"message": "Employee rejected and deleted"}
+
+# Update normal employee list to only show 'active' employees
 @router.get("/admin/employees")
 async def get_employees(current_user: dict = Depends(get_current_user)):
     if current_user["role"] != "admin":
@@ -119,7 +260,7 @@ async def get_employees(current_user: dict = Depends(get_current_user)):
     org_code = current_user.get("org")
     if not org_code:
         raise HTTPException(status_code=400, detail="No organization found for admin")
-    employees = await db["users"].find({"role": "employee", "org_code": org_code}).to_list(length=1000)
+    employees = await db["users"].find({"role": "employee", "org_code": org_code, "status": "active"}).to_list(length=1000)
     cleaned_employees = []
     for emp in employees:
         emp.pop("password", None)

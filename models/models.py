@@ -14,6 +14,7 @@ class User(BaseModel):
     password: str
     role: str = "student"
     org_code: Optional[str] = None
+    status: str = "active"  # 'pending', 'active', 'rejected'
 
 class TokenResponse(BaseModel):
     access_token: str
